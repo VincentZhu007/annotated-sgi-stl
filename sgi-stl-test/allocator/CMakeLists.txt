@@ -1,0 +1,1 @@
+add_executable(zhu_allocator_test zhu_allocator_test.cpp)
