@@ -13,7 +13,15 @@
 
 ### 6、适配器（Adaptor）
 
-## TODO
-空间适配器
-> 实现`ZhuAllocator`
-> `
+## TODO List
+
+空间适配器 
+- 实现`ZhuAllocator`【Done】
+
+- 梳理空间分配器标准接口
+
+![STL标准allocator接口](./sgi-stl-note/alloc.png)
+
+- 分析具有次级配置的SGI空间分配器
+  
+- 分析基于malloc的空间分配器

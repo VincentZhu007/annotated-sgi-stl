@@ -1,0 +1,26 @@
+@startuml
+'空间分配器接口'
+
+class allocator <<typename T>> {
+.. 默认构造和析构 ..
++ allocator()
++ allocator(const allocator&)
++ ~allocator()
+.. 返回对象地址 ..
++ address(reference x): pointer
++ address(const_reference x): const_pointer
+.. 配置和释放n个对象的空间 ..
++ allocate(size_type n, const void * = 0) : pointer
++ deallocate(pointer p, size_type n): void
+.. 返回可配置的最大空间 ..
++ max_size(): size_type
+.. 创建与销毁对象 ..
+'等同于new ((const void*)p)(value)'
++ construct(pointer p, const T& value): void
+'析构对象，等同于p->~T'
++ destroy(pointer p): void
+}
+
+
+
+@enduml

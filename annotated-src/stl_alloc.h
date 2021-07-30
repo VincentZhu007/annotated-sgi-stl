@@ -40,16 +40,18 @@
 
 #ifndef __THROW_BAD_ALLOC
 #  if defined(__STL_NO_BAD_ALLOC) || !defined(__STL_USE_EXCEPTIONS)
+// 如果不抛出bad_alloc异常，则打印"out of memory"并退出
 #    include <stdio.h>
 #    include <stdlib.h>
 #    define __THROW_BAD_ALLOC fprintf(stderr, "out of memory\n"); exit(1)
 #  else /* Standard conforming out-of-memory handling */
+// 抛出bad_alloc异常
 #    include <new>
 #    define __THROW_BAD_ALLOC throw std::bad_alloc()
 #  endif
 #endif
 
-#include <stddef.h>
+#include <stddef.h> // 使用size_t和ptrdiff_t
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
@@ -88,14 +90,19 @@
 #   define __NODE_ALLOCATOR_THREADS false
 #endif
 
-__STL_BEGIN_NAMESPACE
+__STL_BEGIN_NAMESPACE // namespace std {
 
 #if defined(__sgi) && !defined(__GNUC__) && (_MIPS_SIM != _MIPS_SIM_ABI32)
 #pragma set woff 1174
 #endif
 
+// --------------------------------------------------------------------------
+// 空间分配器1：基于malloc的空间分配器
+// --------------------------------------------------------------------------
+
 // Malloc-based allocator.  Typically slower than default alloc below.
 // Typically thread-safe and more storage efficient.
+// 基于malloc的空间分配器。一般比下面的默认alloc要慢，它是线程安全的，并且存储更加高效。
 #ifdef __STL_STATIC_TEMPLATE_MEMBER_BUG
 # ifdef __DECLARE_GLOBALS_HERE
     void (* __malloc_alloc_oom_handler)() = 0;
