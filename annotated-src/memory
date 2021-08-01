@@ -16,10 +16,10 @@
 #define __SGI_STL_MEMORY
 
 #include <stl_algobase.h>
-#include <stl_alloc.h>
-#include <stl_construct.h>
+#include <stl_alloc.h>          // 负责内存空间的分配和释放
+#include <stl_construct.h>      // 负责对象的构造和析构
 #include <stl_tempbuf.h>
-#include <stl_uninitialized.h>
+#include <stl_uninitialized.h>  // 定义了一些全局函数，用来填充或赋值大块内存数据，属于STL标准规范
 #include <stl_raw_storage_iter.h>
 
 

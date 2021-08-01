@@ -96,10 +96,11 @@ __STL_BEGIN_NAMESPACE // namespace std {
 #pragma set woff 1174
 #endif
 
-// --------------------------------------------------------------------------
-// 空间分配器1：基于malloc的空间分配器
-// --------------------------------------------------------------------------
-
+/**
+ * --------------------------------------------------------------------------
+ * 空间分配器1：基于malloc的空间分配器
+ * --------------------------------------------------------------------------
+ */
 // Malloc-based allocator.  Typically slower than default alloc below.
 // Typically thread-safe and more storage efficient.
 // 基于malloc的空间分配器。一般比下面的默认alloc要慢，它是线程安全的，并且存储更加高效。
@@ -208,6 +209,12 @@ public:
       { _Alloc::deallocate(__p, sizeof (_Tp)); }
 };
 
+
+/**
+ * --------------------------------------------------------------------------
+ * 空间分配器2：用于检查分配空间大小的调试用空间分配器
+ * --------------------------------------------------------------------------
+ */
 // Allocator adaptor to check size arguments for debugging.
 // Reports errors using assert.  Checking can be disabled with
 // NDEBUG, but it's far better to just use the underlying allocator
@@ -260,6 +267,11 @@ typedef malloc_alloc single_client_alloc;
 # else
 
 
+/**
+ * --------------------------------------------------------------------------
+ * 空间分配器3：默认的节点空间分配器
+ * --------------------------------------------------------------------------
+ */
 // Default node allocator.
 // With a reasonable compiler, this should be roughly as fast as the
 // original STL class-specific allocators, but with less fragmentation.
