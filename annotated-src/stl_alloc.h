@@ -52,13 +52,16 @@
 #endif
 
 #include <stddef.h> // 使用size_t和ptrdiff_t
-#include <stdlib.h>
-#include <string.h>
+#include <stdlib.h> // 使用malloc
+#include <string.h> // 使用字符串函数
 #include <assert.h>
 #ifndef __RESTRICT
 #  define __RESTRICT
 #endif
 
+/**
+ * 支持多线程下的空间配置和销毁
+ */
 #ifdef __STL_THREADS
 # include <stl_threads.h>
 # define __NODE_ALLOCATOR_THREADS true
@@ -93,7 +96,7 @@
 __STL_BEGIN_NAMESPACE // namespace std {
 
 #if defined(__sgi) && !defined(__GNUC__) && (_MIPS_SIM != _MIPS_SIM_ABI32)
-#pragma set woff 1174
+#pragma set woff 1174 // ?
 #endif
 
 /**
@@ -259,6 +262,7 @@ public:
 };
 
 
+// 如果定义了__USE_MALLOC宏，表示只使用malloc分配空间。对应这里将alloc定义为malloc_alloc。
 # ifdef __USE_MALLOC
 
 typedef malloc_alloc alloc;
@@ -268,9 +272,17 @@ typedef malloc_alloc single_client_alloc;
 
 
 /**
- * --------------------------------------------------------------------------
+ * -----------------------------------------------------------------------------
  * 空间分配器3：默认的节点空间分配器
- * --------------------------------------------------------------------------
+ *
+ * 特性要点：
+ * 1、节点分配器应该和STL类特有分配器差不多一样快，并且内存碎片更少。
+ *
+ * 实现要点：
+ * 1、如果请求分配的对象大小 > _MAX_BYTES，则这个对象会直接调用malloc分配。
+ * 2、除此之外，分配对象的大小是_S_round_up(requested_size)。用户有足够的空间大小信息，因此
+ * 可以将释放的对象返回到free list，而不是永久的部分删除对象空间。
+ * -----------------------------------------------------------------------------
  */
 // Default node allocator.
 // With a reasonable compiler, this should be roughly as fast as the
@@ -287,6 +299,11 @@ typedef malloc_alloc single_client_alloc;
 //    without permanently losing part of the object.
 //
 
+// 第一个模板参数指定了多线程是否可以使用此分配器。使用一个default_alloc的实例去分配对象，然后
+// 用另一个实例去释放是安全的。这样能够高效将对象的所有权转给第二个实例。这可能会在引用局部性上存
+// 在不好的副作用。
+// 第二个模板参数是未被使用的，只用来创建多个default_alloc实例。
+// 注意：通过不同的分配器实例创建的容器有着不同的类型，限制了这种方法的使用。
 // The first template parameter specifies whether more than one thread
 // may use this allocator.  It is safe to allocate an object from
 // one instance of a default_alloc and deallocate it with another
@@ -304,26 +321,54 @@ typedef malloc_alloc single_client_alloc;
   enum {_NFREELISTS = 16}; // _MAX_BYTES/_ALIGN
 #endif
 
+/**
+ * 默认分配器模板
+ * @tparam threads 是否支持多线程
+ * @tparam inst 实例个数
+ */
 template <bool threads, int inst>
 class __default_alloc_template {
 
 private:
+    // 定义一些实现相关的常量
   // Really we should use static const int x = N
   // instead of enum { x = N }, but few compilers accept the former.
 #if ! (defined(__SUNPRO_CC) || defined(__GNUC__))
-    enum {_ALIGN = 8};
-    enum {_MAX_BYTES = 128};
+    enum {_ALIGN = 8}; // 8字节对齐
+    enum {_MAX_BYTES = 128}; // 不超过128字节时，从内存池分配对象；超过时，使用malloc分配
+    // 以8字节对齐，最大128字节时，分配器内部内存池需要维护的不同大小的内存尺寸有：8,16,24,32,
+    // 40,48,56,64,...,120,128，共16种。因此对应需要有16个free memory list。
     enum {_NFREELISTS = 16}; // _MAX_BYTES/_ALIGN
 # endif
+
+    /**
+     * 根据请求分配的对象大小计算实际分配空间大小。
+     * @param __bytes 请求分配的对象大小
+     * @return 实际分配的空间大小
+     */
   static size_t
-  _S_round_up(size_t __bytes) 
+  _S_round_up(size_t __bytes)
+    // 实现说明：类似于ceil，向上找到8的整数倍
+    // STEP1：((__bytes) + (size_t) _ALIGN-1) = __bytes + 7
+    // 如果__bytes为8的整n倍，则__bytes+7仍为8的n倍加一个余数；如果__bytes非8的整数倍，则
+    // __bytes+7为8的n+1倍加一个余数（此余数可能为0~7）。
+    //
+    // STEP2：~((size_t) _ALIGN - 1) = ~ 7 = ~111b = 111..111000b 最后3位为0
+    //
+    // STEP3： & (~7) 等价于 % 8 * 8，去掉STEP1处理后的余数。
     { return (((__bytes) + (size_t) _ALIGN-1) & ~((size_t) _ALIGN - 1)); }
 
 __PRIVATE:
+    /**
+     * 对一个变量的两种解读：
+     * （1）指向下一个union对象的指针，64位
+     * （2）用户数据
+     */
   union _Obj {
         union _Obj* _M_free_list_link;
         char _M_client_data[1];    /* The client sees this.        */
   };
+
 private:
 # if defined(__SUNPRO_CC) || defined(__GNUC__) || defined(__HP_aCC)
     static _Obj* __STL_VOLATILE _S_free_list[]; 
@@ -331,17 +376,38 @@ private:
 # else
     static _Obj* __STL_VOLATILE _S_free_list[_NFREELISTS]; 
 # endif
+
+    /**
+     * 获取freelist的索引
+     * 每种大小的空间都对应一个freelist，freelist的头指针从0~15依次存放在freelist数组中，
+     * 需要根据分配对象的空间大小计算出处于0到15之间的索引值。
+     * @param __bytes 请求分配的对象大小
+     * @return freelist数组索引，范围0~15
+     */
   static  size_t _S_freelist_index(size_t __bytes) {
         return (((__bytes) + (size_t)_ALIGN-1)/(size_t)_ALIGN - 1);
   }
 
+  /**
+   * 返回一个大小为n的对象，并且有空将此对象加到大小为n的free list中
+   * @param __n
+   * @return
+   */
   // Returns an object of size __n, and optionally adds to size __n free list.
   static void* _S_refill(size_t __n);
+
+  /**
+   * 为nobjs个大小为size的对象分配内存块，如果不方便分配所需数量的对象，可能会减少分配的nobjs
+   * 个数。
+   * @param __size 请求分配的对象大小
+   * @param __nobjs 输入：请求分配的对象个数，输出：实际分配的对象个数。
+   * @return 所分配的内存块首地址
+   */
   // Allocates a chunk for nobjs of size size.  nobjs may be reduced
   // if it is inconvenient to allocate the requested number.
   static char* _S_chunk_alloc(size_t __size, int& __nobjs);
 
-  // Chunk allocation state.
+  // Chunk allocation state. 内存块分配是的一些状态信息。
   static char* _S_start_free;
   static char* _S_end_free;
   static size_t _S_heap_size;
@@ -363,17 +429,31 @@ private:
 
 public:
 
+    /**
+     * SGI分配器（具备层次分配器的allocator）内存分配函数
+     * 分配策略：
+     * （1）size > 128字节时，使用malloc分配内存
+     * （2）size <= 128时，从内置的内存池中分配内存
+     *
+     * @param __n 请求分配的空间大小
+     * @return 分配的空间地址
+     */
   /* __n must be > 0      */
   static void* allocate(size_t __n)
   {
     void* __ret = 0;
 
-    if (__n > (size_t) _MAX_BYTES) {
+    if (__n > (size_t) _MAX_BYTES) { // 超过128字节，使用malloc分配内存
       __ret = malloc_alloc::allocate(__n);
     }
     else {
+      /* 从内置内存池分配空间 */
+
+      // 从free list数组中找到符合大小的那个free list
       _Obj* __STL_VOLATILE* __my_free_list
           = _S_free_list + _S_freelist_index(__n);
+
+      // 处理多线程
       // Acquire the lock here with a constructor call.
       // This ensures that it is released in exit or during stack
       // unwinding.
@@ -381,11 +461,14 @@ public:
       /*REFERENCED*/
       _Lock __lock_instance;
 #     endif
+
       _Obj* __RESTRICT __result = *__my_free_list;
-      if (__result == 0)
+      if (__result == 0) // 如果为空，表示当前没有此种大小的free list
         __ret = _S_refill(_S_round_up(__n));
       else {
+        // 将free list数组保存的链表头指向下一个节点
         *__my_free_list = __result -> _M_free_list_link;
+        // 返回原来的链表头
         __ret = __result;
       }
     }
@@ -393,6 +476,11 @@ public:
     return __ret;
   };
 
+  /**
+   * 释放p所指向的内存空间。
+   * @param __p 要释放的对象指针
+   * @param __n 要释放的空间大小
+   */
   /* __p may not be 0 */
   static void deallocate(void* __p, size_t __n)
   {
@@ -515,7 +603,7 @@ template <bool __threads, int __inst>
 void*
 __default_alloc_template<__threads, __inst>::_S_refill(size_t __n)
 {
-    int __nobjs = 20;
+    int __nobjs = 20; // 为什么是20个对象？
     char* __chunk = _S_chunk_alloc(__n, __nobjs);
     _Obj* __STL_VOLATILE* __my_free_list;
     _Obj* __result;
@@ -523,10 +611,12 @@ __default_alloc_template<__threads, __inst>::_S_refill(size_t __n)
     _Obj* __next_obj;
     int __i;
 
-    if (1 == __nobjs) return(__chunk);
+    if (1 == __nobjs) return(__chunk); // 如果前面只分配到一个对象，则直接返回此对象。
+
+    // 获取链表数组中空间大小为n的链表头
     __my_free_list = _S_free_list + _S_freelist_index(__n);
 
-    /* Build free list in chunk */
+    /* Build free list in chunk 为20个对象的内存块建立free list */
       __result = (_Obj*)__chunk;
       *__my_free_list = __next_obj = (_Obj*)(__chunk + __n);
       for (__i = 1; ; __i++) {
