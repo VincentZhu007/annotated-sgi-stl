@@ -1,0 +1,21 @@
+@startuml
+
+class __default_alloc_template {
+.. 内部freelists ..
+- {static} _Obj* _S_free_list[16]
+- {static} char* _S_start_free
+- {static} char* _S_end_free
+- {static} char* _S_heap_size
+.. 内部实现 ..
+- {static} _S_round_up(): size_t
+- {static} _S_freelist_index(): size_t
+- {static} _S_refill(): void*
+- {static} _S_chunk_alloc(): char*
+-- 接口实现 --
++ {static} allocate(): void*
++ {static} deallocate(): void
++ {static} reallocate(): void*
+}
+
+
+@enduml

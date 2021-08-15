@@ -323,7 +323,8 @@ typedef malloc_alloc single_client_alloc;
 
 /**
  * 默认分配器模板
- * @tparam threads 是否支持多线程
+ * 注意：此分配器没有类型参数
+ * @tparam threads 是否支持多线程，用在多线程环境下
  * @tparam inst 实例个数
  */
 template <bool threads, int inst>
@@ -334,7 +335,7 @@ private:
   // Really we should use static const int x = N
   // instead of enum { x = N }, but few compilers accept the former.
 #if ! (defined(__SUNPRO_CC) || defined(__GNUC__))
-    enum {_ALIGN = 8}; // 8字节对齐
+    enum {_ALIGN = 8}; // 8字节对齐，分配的内存大小必须是8的倍数
     enum {_MAX_BYTES = 128}; // 不超过128字节时，从内存池分配对象；超过时，使用malloc分配
     // 以8字节对齐，最大128字节时，分配器内部内存池需要维护的不同大小的内存尺寸有：8,16,24,32,
     // 40,48,56,64,...,120,128，共16种。因此对应需要有16个free memory list。
@@ -360,7 +361,7 @@ private:
 
 __PRIVATE:
     /**
-     * 对一个变量的两种解读：
+     * 对一个地址变量的两种解读：
      * （1）指向下一个union对象的指针，64位
      * （2）用户数据
      */
@@ -389,7 +390,7 @@ private:
   }
 
   /**
-   * 返回一个大小为n的对象，并且有空将此对象加到大小为n的free list中
+   * 返回一个大小为n的对象，并且有可能将此对象加到大小为n的free list中
    * @param __n
    * @return
    */
@@ -408,8 +409,8 @@ private:
   static char* _S_chunk_alloc(size_t __size, int& __nobjs);
 
   // Chunk allocation state. 内存块分配是的一些状态信息。
-  static char* _S_start_free;
-  static char* _S_end_free;
+  static char* _S_start_free; // 内存池起始位置，只在chunk_alloc()中变化
+  static char* _S_end_free;   // 内存池结束位置（下一位置？），只在chunk_alloc()中变化
   static size_t _S_heap_size;
 
 # ifdef __STL_THREADS
@@ -463,8 +464,8 @@ public:
 #     endif
 
       _Obj* __RESTRICT __result = *__my_free_list;
-      if (__result == 0) // 如果为空，表示当前没有此种大小的free list
-        __ret = _S_refill(_S_round_up(__n));
+      if (__result == 0) // 如果为空，表示对应尺寸的freelist已满，没有free节点
+        __ret = _S_refill(_S_round_up(__n)); // 传入的大小需要是8的整数倍
       else {
         // 将free list数组保存的链表头指向下一个节点
         *__my_free_list = __result -> _M_free_list_link;
@@ -526,7 +527,15 @@ inline bool operator!=(const __default_alloc_template<__threads, __inst>&,
 # endif /* __STL_FUNCTION_TMPL_PARTIAL_ORDER */
 
 
-
+/**
+ * 分配大块内存，避免内存碎片化问题。
+ * 这里认为输入的size是对齐处理过的（8的倍数）
+ * @tparam __threads
+ * @tparam __inst
+ * @param __size 单个对象的大小
+ * @param __nobjs 对象个数
+ * @return
+ */
 /* We allocate memory in large chunks in order to avoid fragmenting     */
 /* the malloc heap too much.                                            */
 /* We assume that size is properly aligned.                             */
@@ -537,46 +546,60 @@ __default_alloc_template<__threads, __inst>::_S_chunk_alloc(size_t __size,
                                                             int& __nobjs)
 {
     char* __result;
-    size_t __total_bytes = __size * __nobjs;
-    size_t __bytes_left = _S_end_free - _S_start_free;
+    size_t __total_bytes = __size * __nobjs; // 本次请求分配的空间，这里用request_size更合适
+    size_t __bytes_left = _S_end_free - _S_start_free; // 检查内存池空间空间是否有剩余
 
-    if (__bytes_left >= __total_bytes) {
+    if (__bytes_left >= __total_bytes) { // 如果剩余空间 >= 请求分配空间，可以从内存池分配
+        __result = _S_start_free; // 从低地址开始分配，_S_start_free向后移动
+        _S_start_free += __total_bytes;
+        return(__result);
+    } else if (__bytes_left >= __size) { // 请求空间大小超过剩余free空间，但剩余空间仍可以分配至少一个对象
+        __nobjs = (int)(__bytes_left/__size); // 计算剩余free空间可以分配的对象
+        __total_bytes = __size * __nobjs; // 这里的策略是：把free空间尽量用完
         __result = _S_start_free;
         _S_start_free += __total_bytes;
         return(__result);
-    } else if (__bytes_left >= __size) {
-        __nobjs = (int)(__bytes_left/__size);
-        __total_bytes = __size * __nobjs;
-        __result = _S_start_free;
-        _S_start_free += __total_bytes;
-        return(__result);
-    } else {
+    } else { // 剩余free空间连一个对象都无法分配了，只能找内核分配新的free空间
+        // 关键点：计算这次找内核分配的空间大小
+        // 首先需要保证满足当前的请求，那至少需要__total_bytes，考虑到下次程序还需要分配类似大小的空间，
+        // 因此至少分配2 * __total_bytes。另外，还要兼顾内存池的后续分配，再额外分配内存池大小的1/16。
         size_t __bytes_to_get = 
 	  2 * __total_bytes + _S_round_up(_S_heap_size >> 4);
-        // Try to make use of the left-over piece.
+        // Try to make use of the left-over piece. 尝试使用剩余的空间，把空间给合适的freelist
+        // 这里有两个问题：
+        // （1）这里只加了一次？不是以for循环，依次从最近的大尺寸free_list开始加吗？
+        // （2）加的时候应该往下降一级？比如还剩127字节，这里被分到最后一组free_list[15]，
+        //     但free_list[15]对应的尺寸大小是128，那最后一个是不能用的。
+        //     或许可以这样解读，因为每个free_list的最后一个节点是不能分配出去的，是一个桩节点，
+        //     如果加到free_list作为最后一个节点，因为剩余空间>=8，至少可以存放一个指针，所以
+        //     作为桩节点是没有问题的，它保存的next指针为NULL即可。
+        //     但这里是从头部添加，长度不够能用吗？
         if (__bytes_left > 0) {
             _Obj* __STL_VOLATILE* __my_free_list =
                         _S_free_list + _S_freelist_index(__bytes_left);
 
+            // 从链表头部添加进去
             ((_Obj*)_S_start_free) -> _M_free_list_link = *__my_free_list;
             *__my_free_list = (_Obj*)_S_start_free;
         }
+        /**
+         * 下面是向内核申请分配新的内存
+         */
         _S_start_free = (char*)malloc(__bytes_to_get);
-        if (0 == _S_start_free) {
+        if (0 == _S_start_free) { // malloc失败
             size_t __i;
             _Obj* __STL_VOLATILE* __my_free_list;
-	    _Obj* __p;
+	        _Obj* __p;
             // Try to make do with what we have.  That can't
             // hurt.  We do not try smaller requests, since that tends
             // to result in disaster on multi-process machines.
-            for (__i = __size;
-                 __i <= (size_t) _MAX_BYTES;
-                 __i += (size_t) _ALIGN) {
+            // 从小到大尝试8~128字节的内存
+            for (__i = __size; __i <= (size_t) _MAX_BYTES; __i += (size_t) _ALIGN) {
                 __my_free_list = _S_free_list + _S_freelist_index(__i);
-                __p = *__my_free_list;
-                if (0 != __p) {
-                    *__my_free_list = __p -> _M_free_list_link;
-                    _S_start_free = (char*)__p;
+                __p = *__my_free_list; // next指针
+                if (0 != __p) { // 如果此free_list仍有剩余节点
+                    *__my_free_list = __p -> _M_free_list_link; // 弹出链表顶端节点
+                    _S_start_free = (char*)__p; // 将释放出来的节点作为free内存
                     _S_end_free = _S_start_free + __i;
                     return(_S_chunk_alloc(__size, __nobjs));
                     // Any leftover piece will eventually make it to the
@@ -595,7 +618,13 @@ __default_alloc_template<__threads, __inst>::_S_chunk_alloc(size_t __size,
     }
 }
 
-
+/**
+ * 返回大小为__n（8的整数倍）的内存，并且可能向对应大小的freelist中补充节点
+ * @tparam __threads
+ * @tparam __inst
+ * @param __n
+ * @return
+ */
 /* Returns an object of size __n, and optionally adds to size __n free list.*/
 /* We assume that __n is properly aligned.                                */
 /* We hold the allocation lock.                                         */
@@ -604,7 +633,8 @@ void*
 __default_alloc_template<__threads, __inst>::_S_refill(size_t __n)
 {
     int __nobjs = 20; // 为什么是20个对象？
-    char* __chunk = _S_chunk_alloc(__n, __nobjs);
+    // 1. 分配大块内存
+    char* __chunk = _S_chunk_alloc(__n, __nobjs); // freelist不够用了，为freelist增加一些节点分配空间
     _Obj* __STL_VOLATILE* __my_free_list;
     _Obj* __result;
     _Obj* __current_obj;
@@ -613,22 +643,24 @@ __default_alloc_template<__threads, __inst>::_S_refill(size_t __n)
 
     if (1 == __nobjs) return(__chunk); // 如果前面只分配到一个对象，则直接返回此对象。
 
-    // 获取链表数组中空间大小为n的链表头
-    __my_free_list = _S_free_list + _S_freelist_index(__n);
+    __my_free_list = _S_free_list + _S_freelist_index(__n); // 获取链表数组中空间大小为n的链表头
 
     /* Build free list in chunk 为20个对象的内存块建立free list */
-      __result = (_Obj*)__chunk;
-      *__my_free_list = __next_obj = (_Obj*)(__chunk + __n);
-      for (__i = 1; ; __i++) {
+    // 2. 取第一个对象返回
+    __result = (_Obj*)__chunk;
+
+    // 3. 对剩余的对象建立链表
+    *__my_free_list = __next_obj = (_Obj*)(__chunk + __n);
+    for (__i = 1; ; __i++) {
         __current_obj = __next_obj;
         __next_obj = (_Obj*)((char*)__next_obj + __n);
-        if (__nobjs - 1 == __i) {
+        if (__nobjs - 1 == __i) { // 最后一个节点
             __current_obj -> _M_free_list_link = 0;
             break;
         } else {
             __current_obj -> _M_free_list_link = __next_obj;
         }
-      }
+    }
     return(__result);
 }
 
